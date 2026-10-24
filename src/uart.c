@@ -78,6 +78,9 @@ static volatile uint32_t PlatformUart_rxHead;
 static volatile uint32_t PlatformUart_rxTail;
 static volatile bool     PlatformUart_rxSignalPending;
 
+/* A send-done whose signal found the processing queue full. */
+static bool PlatformUart_txDoneLost;
+
 static void uartReadCallback(UART2_Handle aHandle, void *aBuf, size_t aLen, void *userArg, int_fast16_t status)
 {
     (void)aHandle;
@@ -181,7 +184,10 @@ otError otPlatUartSend(const uint8_t *aBuf, uint16_t aBufLength)
     ret = UART2_write(PlatformUart_uartHandle, aBuf, aBufLength, NULL);
 
 #if TI_PLAT_UART_BLOCKING
-    platformUartSignal(PLATFORM_UART_EVENT_TX_DONE);
+    if (!platformUartSignal(PLATFORM_UART_EVENT_TX_DONE))
+    {
+        PlatformUart_txDoneLost = true;
+    }
 #endif
 
     return OT_ERROR_NONE;
@@ -215,6 +221,28 @@ void platformUartProcess(uintptr_t arg)
             otPlatUartReceived(&PlatformUart_rxRing[start], (uint16_t)len);
             PlatformUart_rxTail = tail + len;
         }
+    }
+}
+
+void platformUartPoll(void)
+{
+    uintptr_t events = 0;
+
+    /* With a signal pending, its own message drains the ring. */
+    if (!PlatformUart_rxSignalPending && PlatformUart_rxTail != PlatformUart_rxHead)
+    {
+        events |= PLATFORM_UART_EVENT_RX_DONE;
+    }
+
+    if (PlatformUart_txDoneLost)
+    {
+        PlatformUart_txDoneLost = false;
+        events |= PLATFORM_UART_EVENT_TX_DONE;
+    }
+
+    if (events != 0)
+    {
+        platformUartProcess(events);
     }
 }
 

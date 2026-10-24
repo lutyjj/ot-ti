@@ -116,6 +116,13 @@ bool platformUartSignal(uintptr_t arg);
 void platformUartProcess(uintptr_t arg);
 
 /**
+ * Process the uart module as if its signals had all arrived: for work whose
+ * signal found the processing queue full. Harmless when there is none.
+ *
+ */
+void platformUartPoll(void);
+
+/**
  * Signal the processing loop to process the spi module.
  *
  */
