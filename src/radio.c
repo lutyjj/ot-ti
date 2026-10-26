@@ -175,10 +175,22 @@ static RF_CmdHandle sTransmitAckCmdHandle;
 static RF_CmdHandle sTxTestCmdHandle;
 
 /**
+ * The power before the host sets one: OpenThread's
+ * OPENTHREAD_CONFIG_DEFAULT_TRANSMIT_POWER, except on the CC1352P-2 design,
+ * whose 20 dBm PA its 0 dBm leaves unused. 6 dBm is the default of the
+ * OpenThread RCPs Home Assistant ships.
+ */
+#if defined(LAUNCHXL_CC1352P_2)
+#define PLATFORM_RADIO_DEFAULT_TX_POWER 6
+#else
+#define PLATFORM_RADIO_DEFAULT_TX_POWER OPENTHREAD_CONFIG_DEFAULT_TRANSMIT_POWER
+#endif
+
+/**
  * Value requested in dBm from the upper layers on the last call to
  * @ref otPlatRadioSetTransmitPower.
  */
-static int8_t sReqTxPower = 0U;
+static int8_t sReqTxPower = PLATFORM_RADIO_DEFAULT_TX_POWER;
 static uint16_t sCurrentRegionCode = 0;
 
 /**
@@ -205,6 +217,37 @@ static const struct tx_power_max cTxMaxPower[] = {
 
 #endif
 };
+
+#if defined(LAUNCHXL_CC1352P_2)
+/**
+ * High PA settings for 6 to 13 dBm, which TI's PA data leaves out between the
+ * default PA's 5 dBm and the high PA's 14 dBm. TI has not characterised them;
+ * they are the ones Koenkk's Z-Stack firmware has shipped for this design
+ * (Koenkk/Z-Stack-firmware, coordinator/Z-Stack_3.x.0/firmware.patch, the
+ * CC1352P_2_LAUNCHXL ti_radio_config.c). On a Sonoff ZBDongle-P, by the
+ * RSSI a Matter device reported for its frames, they radiate about 2 to 3 dB
+ * above their labels relative to TI's 14 dBm entry.
+ */
+static const RF_TxPowerTable_Entry cTxPowerTableExtra[] = {
+    {6, .value.rawValue = 0x144f2a, .value.paType = RF_TxPowerTable_HighPA},
+    {7, .value.rawValue = 0x14285f, .value.paType = RF_TxPowerTable_HighPA},
+    {8, .value.rawValue = 0x10335a, .value.paType = RF_TxPowerTable_HighPA},
+    {9, .value.rawValue = 0x103f5f, .value.paType = RF_TxPowerTable_HighPA},
+    {10, .value.rawValue = 0x104f66, .value.paType = RF_TxPowerTable_HighPA},
+    {11, .value.rawValue = 0x3021cb, .value.paType = RF_TxPowerTable_HighPA},
+    {12, .value.rawValue = 0x3f27cc, .value.paType = RF_TxPowerTable_HighPA},
+    {13, .value.rawValue = 0x3fc3cd, .value.paType = RF_TxPowerTable_HighPA},
+};
+
+/**
+ * The generated txPowerTable with cTxPowerTableExtra merged in, built by
+ * rfCoreInitTxPowerTable. TX_POWER_TABLE_SIZE counts the termination entry.
+ */
+static RF_TxPowerTable_Entry sTxPowerTable[TX_POWER_TABLE_SIZE + otARRAY_LENGTH(cTxPowerTableExtra)];
+#define TX_POWER_TABLE sTxPowerTable
+#else
+#define TX_POWER_TABLE txPowerTable
+#endif
 
 /* Status of the coex priority signal line. This is passed to the RF Driver
  * with the scheduling parameters for each command. The value of this will only
@@ -939,7 +982,7 @@ static otError rfCoreSetTransmitPower(int8_t aPower)
     }
 
     /* find the tx power configuration */
-    newValue = RF_TxPowerTable_findValue(txPowerTable, aPower);
+    newValue = RF_TxPowerTable_findValue(TX_POWER_TABLE, aPower);
 
     otEXPECT_ACTION(RF_TxPowerTable_INVALID_VALUE != newValue.rawValue, retval = OT_ERROR_INVALID_ARGS);
     otEXPECT_ACTION(RF_StatSuccess == RF_setTxPower(sRfHandle, newValue), retval = OT_ERROR_FAILED);
@@ -1105,8 +1148,43 @@ void rfCoreRequestCoex(bool aEnable)
     }
 }
 
+/**
+ * Merges cTxPowerTableExtra into the generated txPowerTable. Both ascend in
+ * power, as RF_TxPowerTable_findValue requires; where both hold a power,
+ * TI's characterised entry wins.
+ */
+static void rfCoreInitTxPowerTable(void)
+{
+#if defined(LAUNCHXL_CC1352P_2)
+    const RF_TxPowerTable_Entry *ti       = txPowerTable;
+    const RF_TxPowerTable_Entry *extra    = cTxPowerTableExtra;
+    const RF_TxPowerTable_Entry *extraEnd = extra + otARRAY_LENGTH(cTxPowerTableExtra);
+    RF_TxPowerTable_Entry       *out      = sTxPowerTable;
+
+    while (ti->power != RF_TxPowerTable_INVALID_DBM || extra < extraEnd)
+    {
+        if (extra < extraEnd && (ti->power == RF_TxPowerTable_INVALID_DBM || extra->power < ti->power))
+        {
+            *out++ = *extra++;
+        }
+        else
+        {
+            if (extra < extraEnd && extra->power == ti->power)
+            {
+                extra++;
+            }
+            *out++ = *ti++;
+        }
+    }
+
+    /* the termination entry */
+    *out = *ti;
+#endif
+}
+
 void platformRadioInit(void)
 {
+    rfCoreInitTxPowerTable();
     rfCoreInitBufs();
     rfCoreInitSetupCmd();
     /* Populate the RX parameters data structure with default values */
@@ -1242,7 +1320,7 @@ otError otPlatRadioGetTransmitPower(otInstance *aInstance, int8_t *aPower)
     (void)aInstance;
 
     otEXPECT_ACTION(aPower != NULL, error = OT_ERROR_INVALID_ARGS);
-    *aPower = RF_TxPowerTable_findPowerLevel(txPowerTable, RF_getTxPower(sRfHandle));
+    *aPower = RF_TxPowerTable_findPowerLevel(TX_POWER_TABLE, RF_getTxPower(sRfHandle));
 
 exit:
     return error;

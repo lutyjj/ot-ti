@@ -3,13 +3,14 @@
 #  Checks an RCP over its serial port: that it answers, that it keeps
 #  answering bursts of host frames longer than the UART driver's 256-byte
 #  read, that its short and extended source match tables remove the entry
-#  asked for and clear completely, and (--watchdog) that it resets itself
-#  when its loop hangs. Expected results follow from spinel, so a correct
+#  asked for and clear completely, (--pa20) that a board with a 2.4 GHz
+#  20 dBm PA starts at 6 dBm and sets every power from 6 to 20 dBm, and
+#  (--watchdog) that it resets itself when its loop hangs. Expected results follow from spinel, so a correct
 #  RCP passes every check. The source match defects fixed on this branch
 #  fail it; the UART ones fail it only when a burst reaches the driver as a
 #  single read, which depends on the USB bridge's timing.
 #
-#  usage: script/rcp-test /dev/ttyUSB0 [--baudrate 460800] [--reset sonoff]
+#  usage: script/rcp-test /dev/ttyUSB0 [--baudrate 460800] [--reset sonoff] [--pa20]
 #
 #  Needs Python 3 and pyserial. Holds the port alone: stop otbr-agent first.
 
@@ -25,14 +26,15 @@ FLAG, ESCAPE = 0x7E, 0x7D
 ESCAPED = {0x11, 0x13, 0x7D, 0x7E, 0xF8}
 
 # Spinel (openthread src/lib/spinel/spinel.h).
-CMD_NOOP, CMD_GET, CMD_SET, CMD_INSERT, CMD_REMOVE = 0, 2, 3, 4, 5
+CMD_NOOP, CMD_RESET, CMD_GET, CMD_SET, CMD_INSERT, CMD_REMOVE = 0, 1, 2, 3, 4, 5
 CMD_IS, CMD_INSERTED, CMD_REMOVED = 6, 7, 8
 PROP_LAST_STATUS, PROP_NCP_VERSION = 0, 2
-PROP_PHY_ENABLED, PROP_PHY_CHAN = 0x20, 0x21
+PROP_PHY_ENABLED, PROP_PHY_CHAN, PROP_PHY_TX_POWER = 0x20, 0x21, 0x25
 PROP_MAC_15_4_PANID, PROP_MAC_RAW_STREAM_ENABLED = 0x36, 0x37
 PROP_SRC_MATCH_ENABLED, PROP_SRC_MATCH_SHORT, PROP_SRC_MATCH_EXT = 0x1303, 0x1304, 0x1305
 PROP_RCP_API_VERSION = 0xB0
 PROP_DEBUG_TEST_WATCHDOG = 0x4002
+RESET_PLATFORM = 1
 STATUS_OK = 0
 STATUS_RESET_FIRST, STATUS_RESET_LAST = 112, 127
 
@@ -274,12 +276,9 @@ def check_src_match(rcp, checks):
     rcp.call(CMD_SET, packed_uint(PROP_PHY_ENABLED) + b"\x00")
 
 
-def check_watchdog(rcp, checks):
-    # Getting this property makes the RCP spin forever (openthread
-    # src/ncp/ncp_base.cpp): only a watchdog brings it back.
-    rcp.responses(0)
-    rcp.send(1, CMD_GET, packed_uint(PROP_DEBUG_TEST_WATCHDOG))
-    deadline = time.monotonic() + 10
+def wait_reset(rcp, timeout):
+    """Whether the RCP announces a reset (a reset status, TID 0) within timeout."""
+    deadline = time.monotonic() + timeout
     reset = False
     while time.monotonic() < deadline and not reset:
         rcp.pending += rcp.serial.read(4096)
@@ -291,7 +290,60 @@ def check_watchdog(rcp, checks):
                 code = read_packed_uint(frame, pos)[0]
                 reset = reset or STATUS_RESET_FIRST <= code <= STATUS_RESET_LAST
         rcp.frames.clear()
-    checks.check("resets itself when its loop hangs", reset)
+    return reset
+
+
+def check_pa20(rcp, checks):
+    # The CC1352P-2 design (the Sonoff ZBDongle-P): TI's PA data covers -20
+    # to 5 dBm on the default PA and 14 to 20 dBm on the high PA, the
+    # platform adds 6 to 13 dBm, and a request between steps gets the step
+    # below. Channels 25 and 26 cap at 19 and 15 dBm (src/radio.c).
+    tx_power = packed_uint(PROP_PHY_TX_POWER)
+
+    def power():
+        r = rcp.call(CMD_GET, tx_power)
+        return int.from_bytes(r[3][:1], "little", signed=True) if r and r[2] == PROP_PHY_TX_POWER else None
+
+    def set_power(dbm):
+        rcp.call(CMD_SET, tx_power + dbm.to_bytes(1, "little", signed=True))
+        return power()
+
+    def channel(ch):
+        rcp.call(CMD_SET, packed_uint(PROP_PHY_CHAN) + bytes([ch]))
+
+    # A platform reset first, so the power is the firmware's default and not
+    # one a host set: a stack reset (otInstanceResetRadioStack) keeps it.
+    rcp.responses(0)
+    rcp.send(0, CMD_RESET, bytes([RESET_PLATFORM]))
+    checks.check("reboots on CMD_RESET(PLATFORM)", wait_reset(rcp, 3))
+    rcp.call(CMD_SET, packed_uint(PROP_PHY_ENABLED) + b"\x01")
+    channel(20)
+    rcp.call(CMD_SET, packed_uint(PROP_MAC_RAW_STREAM_ENABLED) + b"\x01")
+    checks.check("starts at 6 dBm", power() == 6, f"{power()} dBm")
+
+    wrong = {dbm: got for dbm in range(6, 21) if (got := set_power(dbm)) != dbm}
+    checks.check("sets every power from 6 to 20 dBm", not wrong,
+                 ", ".join(f"{dbm} gave {got}" for dbm, got in wrong.items()))
+    checks.check("takes the step below between steps", set_power(-7) == -9, f"-7 gave {power()}")
+
+    set_power(20)
+    channel(25)
+    checks.check("caps channel 25 at 19 dBm", set_power(20) == 19, f"{power()} dBm")
+    channel(26)
+    checks.check("caps channel 26 at 15 dBm", set_power(20) == 15, f"{power()} dBm")
+
+    # Leave the firmware's default, not the 20 dBm set above: a host that
+    # sets no power of its own keeps it across the stack reset it sends.
+    rcp.send(0, CMD_RESET, bytes([RESET_PLATFORM]))
+    checks.check("reboots to its default afterwards", wait_reset(rcp, 3))
+
+
+def check_watchdog(rcp, checks):
+    # Getting this property makes the RCP spin forever (openthread
+    # src/ncp/ncp_base.cpp): only a watchdog brings it back.
+    rcp.responses(0)
+    rcp.send(1, CMD_GET, packed_uint(PROP_DEBUG_TEST_WATCHDOG))
+    checks.check("resets itself when its loop hangs", wait_reset(rcp, 10))
     checks.check("answers after that reset", check_alive(rcp, Checks()))
 
 
@@ -301,6 +353,9 @@ def main():
     parser.add_argument("--baudrate", type=int, default=460800)
     parser.add_argument("--reset", choices=["sonoff"], help="reset the RCP first through DTR/RTS")
     parser.add_argument("--rounds", type=int, default=20)
+    parser.add_argument("--pa20", action="store_true",
+                        help="also check the transmit powers of a board with a 2.4 GHz 20 dBm PA "
+                        "(CC1352P-2 LaunchPad, Sonoff ZBDongle-P)")
     parser.add_argument("--watchdog", action="store_true",
                         help="also hang the RCP on purpose and expect it to reset (a stick without a "
                         "watchdog then needs --reset sonoff or a replug)")
@@ -320,6 +375,8 @@ def main():
         check_burst(rcp, checks, "many short frames", count=15, padding=10, rounds=args.rounds)
         checks.check("still answers after the bursts", check_alive(rcp, Checks()))
         check_src_match(rcp, checks)
+        if args.pa20:
+            check_pa20(rcp, checks)
         if args.watchdog:
             check_watchdog(rcp, checks)
 
