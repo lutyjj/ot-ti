@@ -961,15 +961,14 @@ static void rfCoreSendReceiveCmd(RF_Handle aRfHandle)
 }
 
 /**
- * @brief Sets the transmit.
+ * @brief Finds the power table value for a requested power.
  *
- * Sets the transmit power within the radio setup command or the override list.
+ * Caps the request at the current channel's back-off, then takes the table
+ * step at or below it.
  */
-static otError rfCoreSetTransmitPower(int8_t aPower)
+static RF_TxPowerTable_Value rfCoreTxPowerValue(int8_t aPower)
 {
-    otError               retval = OT_ERROR_NONE;
-    RF_TxPowerTable_Value newValue;
-    unsigned int          i;
+    unsigned int i;
 
     /* search for a matching backoff if there is one */
     for (i = 0; i < (sizeof(cTxMaxPower) / sizeof(cTxMaxPower[0])); i++)
@@ -981,8 +980,18 @@ static otError rfCoreSetTransmitPower(int8_t aPower)
         }
     }
 
-    /* find the tx power configuration */
-    newValue = RF_TxPowerTable_findValue(TX_POWER_TABLE, aPower);
+    return RF_TxPowerTable_findValue(TX_POWER_TABLE, aPower);
+}
+
+/**
+ * @brief Sets the transmit.
+ *
+ * Sets the transmit power within the radio setup command or the override list.
+ */
+static otError rfCoreSetTransmitPower(int8_t aPower)
+{
+    otError               retval   = OT_ERROR_NONE;
+    RF_TxPowerTable_Value newValue = rfCoreTxPowerValue(aPower);
 
     otEXPECT_ACTION(RF_TxPowerTable_INVALID_VALUE != newValue.rawValue, retval = OT_ERROR_INVALID_ARGS);
     otEXPECT_ACTION(RF_StatSuccess == RF_setTxPower(sRfHandle, newValue), retval = OT_ERROR_FAILED);
@@ -1215,6 +1224,9 @@ otError otPlatRadioEnable(otInstance *aInstance)
         otEXPECT_ACTION(sRfHandle != NULL, error = OT_ERROR_FAILED);
         sState = platformRadio_phyState_Sleep;
 
+        /* the power the host set while the radio was disabled */
+        rfCoreSetTransmitPower(sReqTxPower);
+
         error = OT_ERROR_NONE;
     }
 
@@ -1307,20 +1319,45 @@ exit:
 
 otError otPlatRadioSetTransmitPower(otInstance *aInstance, int8_t aPower)
 {
+    otError error = OT_ERROR_NONE;
     (void)aInstance;
-    /* update the tracking variable */
+
+    otEXPECT_ACTION(RF_TxPowerTable_findValue(TX_POWER_TABLE, aPower).rawValue != RF_TxPowerTable_INVALID_VALUE,
+                    error = OT_ERROR_INVALID_ARGS);
     sReqTxPower = aPower;
-    /* set the power */
-    return rfCoreSetTransmitPower(aPower);
+
+    /* A disabled radio has no RF driver client (otbr-agent sets a power
+     * before it enables the radio); otPlatRadioEnable applies sReqTxPower
+     * when it opens one.
+     */
+    if (sState != platformRadio_phyState_Disabled)
+    {
+        error = rfCoreSetTransmitPower(aPower);
+    }
+
+exit:
+    return error;
 }
 
 otError otPlatRadioGetTransmitPower(otInstance *aInstance, int8_t *aPower)
 {
-    otError error = OT_ERROR_NONE;
+    otError               error = OT_ERROR_NONE;
+    RF_TxPowerTable_Value value;
     (void)aInstance;
 
     otEXPECT_ACTION(aPower != NULL, error = OT_ERROR_INVALID_ARGS);
-    *aPower = RF_TxPowerTable_findPowerLevel(TX_POWER_TABLE, RF_getTxPower(sRfHandle));
+
+    /* see otPlatRadioSetTransmitPower */
+    if (sState == platformRadio_phyState_Disabled)
+    {
+        value = rfCoreTxPowerValue(sReqTxPower);
+    }
+    else
+    {
+        value = RF_getTxPower(sRfHandle);
+    }
+
+    *aPower = RF_TxPowerTable_findPowerLevel(TX_POWER_TABLE, value);
 
 exit:
     return error;

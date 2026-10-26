@@ -316,10 +316,20 @@ def check_pa20(rcp, checks):
     rcp.responses(0)
     rcp.send(0, CMD_RESET, bytes([RESET_PLATFORM]))
     checks.check("reboots on CMD_RESET(PLATFORM)", wait_reset(rcp, 3))
-    rcp.call(CMD_SET, packed_uint(PROP_PHY_ENABLED) + b"\x01")
-    channel(20)
-    rcp.call(CMD_SET, packed_uint(PROP_MAC_RAW_STREAM_ENABLED) + b"\x01")
     checks.check("starts at 6 dBm", power() == 6, f"{power()} dBm")
+
+    # otbr-agent sets the power from its radio URL before it enables the
+    # radio, so the RCP must take one while the radio is disabled.
+    refused = rcp.call(CMD_SET, tx_power + (-21).to_bytes(1, "little", signed=True))
+    checks.check("refuses a power below its table and keeps the last one",
+                 status(refused) not in (None, STATUS_OK) and power() == 6, f"{power()} dBm")
+    checks.check("takes a power while the radio is disabled", set_power(9) == 9, f"{power()} dBm")
+    checks.check("still answers after that", check_alive(rcp, Checks()))
+    channel(20)
+    rcp.call(CMD_SET, packed_uint(PROP_PHY_ENABLED) + b"\x01")
+    checks.check("keeps that power once enabled", power() == 9, f"{power()} dBm")
+    rcp.call(CMD_SET, packed_uint(PROP_MAC_RAW_STREAM_ENABLED) + b"\x01")
+    checks.check("keeps that power once receiving", power() == 9, f"{power()} dBm")
 
     wrong = {dbm: got for dbm in range(6, 21) if (got := set_power(dbm)) != dbm}
     checks.check("sets every power from 6 to 20 dBm", not wrong,
@@ -331,6 +341,13 @@ def check_pa20(rcp, checks):
     checks.check("caps channel 25 at 19 dBm", set_power(20) == 19, f"{power()} dBm")
     channel(26)
     checks.check("caps channel 26 at 15 dBm", set_power(20) == 15, f"{power()} dBm")
+
+    # Disabled again after being enabled: the RF driver client is closed.
+    rcp.call(CMD_SET, packed_uint(PROP_MAC_RAW_STREAM_ENABLED) + b"\x00")
+    rcp.call(CMD_SET, packed_uint(PROP_PHY_ENABLED) + b"\x00")
+    channel(20)
+    checks.check("takes a power after the radio is disabled again", set_power(14) == 14, f"{power()} dBm")
+    checks.check("still answers after that", check_alive(rcp, Checks()))
 
     # Leave the firmware's default, not the 20 dBm set above: a host that
     # sets no power of its own keeps it across the stack reset it sends.
