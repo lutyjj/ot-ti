@@ -1764,16 +1764,23 @@ otError otPlatRadioAddSrcMatchExtEntry(otInstance *aInstance, const otExtAddress
 {
     (void)aInstance;
 
-    otError  error      = OT_ERROR_NONE;
-    uint64_t local_addr = *((uint64_t *)aExtAddress); // ensures alignment
-    uint8_t  idx        = rfCoreFindExtSrcMatchIdx(local_addr);
+    otError  error = OT_ERROR_NONE;
+    uint64_t local_addr;
+    uint8_t  idx;
+
+    /* otExtAddress is a byte array, so the platform may assume no more than
+     * byte alignment: a uint64_t load through it compiles to LDRD, which
+     * faults on an address that is not word aligned.
+     */
+    memcpy(&local_addr, aExtAddress, sizeof(local_addr));
+    idx = rfCoreFindExtSrcMatchIdx(local_addr);
 
     if (idx == PLATFORM_RADIO_SRC_MATCH_NONE)
     {
         /* the entry does not exist already, add it */
         otEXPECT_ACTION((idx = rfCoreFindEmptyExtSrcMatchIdx()) != PLATFORM_RADIO_SRC_MATCH_NONE,
                         error = OT_ERROR_NO_BUFS);
-        sSrcMatchExtData.extAddrEnt[idx] = *((uint64_t *)aExtAddress);
+        sSrcMatchExtData.extAddrEnt[idx] = local_addr;
     }
 
     /* verify that we have a running or backgrounded rx command */
@@ -1792,10 +1799,13 @@ otError otPlatRadioClearSrcMatchExtEntry(otInstance *aInstance, const otExtAddre
 {
     (void)aInstance;
 
-    otError  error      = OT_ERROR_NONE;
-    uint64_t local_addr = *((uint64_t *)aExtAddress); // ensures alignment
+    otError  error = OT_ERROR_NONE;
+    uint64_t local_addr;
     uint8_t  idx;
-    otEXPECT_ACTION(idx   = rfCoreFindExtSrcMatchIdx(local_addr) != PLATFORM_RADIO_SRC_MATCH_NONE,
+
+    /* see otPlatRadioAddSrcMatchExtEntry */
+    memcpy(&local_addr, aExtAddress, sizeof(local_addr));
+    otEXPECT_ACTION((idx = rfCoreFindExtSrcMatchIdx(local_addr)) != PLATFORM_RADIO_SRC_MATCH_NONE,
                     error = OT_ERROR_NO_ADDRESS);
 
     /* verify that we have a running or backgrounded rx command */
@@ -1819,8 +1829,13 @@ void otPlatRadioClearSrcMatchShortEntries(otInstance *aInstance)
         unsigned int i;
         for (i = 0; i < PLATFORM_RADIO_SHORTADD_SRC_MATCH_NUM; i++)
         {
-            /* we have a running or backgrounded rx command */
-            otEXPECT(rfCoreModifySourceMatchEntry(sRfHandle, i, platformRadio_address_short, false) == CMDSTA_Done);
+            /* attempt to modify running or backgrounded rx command */
+            if (rfCoreModifySourceMatchEntry(sRfHandle, i, platformRadio_address_short, false) != RF_StatCmdDoneSuccess)
+            {
+                /* we are not running, so we must update the values ourselves */
+                sSrcMatchShortData.srcPendEn[i / 32] &= ~(1 << (i % 32));
+                sSrcMatchShortData.srcMatchEn[i / 32] &= ~(1 << (i % 32));
+            }
         }
     }
     else
@@ -1828,8 +1843,6 @@ void otPlatRadioClearSrcMatchShortEntries(otInstance *aInstance)
         /* we are not running, so we can erase them ourselves */
         memset((void *)&sSrcMatchShortData, 0, sizeof(sSrcMatchShortData));
     }
-exit:
-    return;
 }
 
 void otPlatRadioClearSrcMatchExtEntries(otInstance *aInstance)
@@ -1841,8 +1854,13 @@ void otPlatRadioClearSrcMatchExtEntries(otInstance *aInstance)
         unsigned int i;
         for (i = 0; i < PLATFORM_RADIO_EXTADD_SRC_MATCH_NUM; i++)
         {
-            /* we have a running or backgrounded rx command */
-            otEXPECT(rfCoreModifySourceMatchEntry(sRfHandle, i, platformRadio_address_ext, false) == CMDSTA_Done);
+            /* attempt to modify running or backgrounded rx command */
+            if (rfCoreModifySourceMatchEntry(sRfHandle, i, platformRadio_address_ext, false) != RF_StatCmdDoneSuccess)
+            {
+                /* we are not running, so we must update the values ourselves */
+                sSrcMatchExtData.srcPendEn[i / 32] &= ~(1 << (i % 32));
+                sSrcMatchExtData.srcMatchEn[i / 32] &= ~(1 << (i % 32));
+            }
         }
     }
     else
@@ -1850,8 +1868,6 @@ void otPlatRadioClearSrcMatchExtEntries(otInstance *aInstance)
         /* we are not running, so we can erase them ourselves */
         memset((void *)&sSrcMatchExtData, 0, sizeof(sSrcMatchExtData));
     }
-exit:
-    return;
 }
 
 bool otPlatRadioGetPromiscuous(otInstance *aInstance)
@@ -2009,16 +2025,20 @@ void otPlatRadioSetPanId(otInstance *aInstance, uint16_t aPanid)
 void otPlatRadioSetExtendedAddress(otInstance *aInstance, const otExtAddress *aAddress)
 {
     (void)aInstance;
+    uint64_t address;
+
+    /* see otPlatRadioAddSrcMatchExtEntry */
+    memcpy(&address, aAddress, sizeof(address));
 
     if (platformRadio_phyState_Sleep == sState || platformRadio_phyState_Disabled == sState)
     {
-        sReceiveCmd.localExtAddr = *((uint64_t *)(aAddress));
+        sReceiveCmd.localExtAddr = address;
     }
     else
     {
         rfCoreExecuteAbortCmd(sRfHandle, sReceiveCmdHandle);
 
-        sReceiveCmd.localExtAddr = *((uint64_t *)(aAddress));
+        sReceiveCmd.localExtAddr = address;
 
         rfCoreSendReceiveCmd(sRfHandle);
     }
