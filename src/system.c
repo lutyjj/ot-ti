@@ -170,7 +170,7 @@ void platformAlarmMicroSignal()
     (void) ret;
 }
 
-void platformUartSignal(uintptr_t arg)
+bool platformUartSignal(uintptr_t arg)
 {
     struct OtStack_procQueueMsg msg;
     int                         ret;
@@ -179,7 +179,7 @@ void platformUartSignal(uintptr_t arg)
     ret = mq_send(OtStack_procQueueDesc, (const char *)&msg, sizeof(msg), 0);
     assert(0 == ret);
 
-    (void) ret;
+    return (0 == ret);
 }
 
 void platformSpiSignal()
