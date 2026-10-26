@@ -149,7 +149,8 @@ else
 
 /* Watchdog */
 Watchdog1.$name             = "CONFIG_WATCHDOG0";
-Watchdog1.period            = 1000;
+/* system.c clears it every 500 ms while the processing loop runs */
+Watchdog1.period            = 2000;
 Watchdog1.watchdog.$assign  = "WDT0";
 
 /* TRNG */
