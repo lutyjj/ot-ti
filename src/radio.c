@@ -175,10 +175,22 @@ static RF_CmdHandle sTransmitAckCmdHandle;
 static RF_CmdHandle sTxTestCmdHandle;
 
 /**
+ * The power before the host sets one: OpenThread's
+ * OPENTHREAD_CONFIG_DEFAULT_TRANSMIT_POWER, except on the CC1352P-2 design,
+ * whose 20 dBm PA its 0 dBm leaves unused. 6 dBm is the default of the
+ * OpenThread RCPs Home Assistant ships.
+ */
+#if defined(LAUNCHXL_CC1352P_2)
+#define PLATFORM_RADIO_DEFAULT_TX_POWER 6
+#else
+#define PLATFORM_RADIO_DEFAULT_TX_POWER OPENTHREAD_CONFIG_DEFAULT_TRANSMIT_POWER
+#endif
+
+/**
  * Value requested in dBm from the upper layers on the last call to
  * @ref otPlatRadioSetTransmitPower.
  */
-static int8_t sReqTxPower = 0U;
+static int8_t sReqTxPower = PLATFORM_RADIO_DEFAULT_TX_POWER;
 static uint16_t sCurrentRegionCode = 0;
 
 /**
